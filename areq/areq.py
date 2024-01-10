@@ -29,7 +29,7 @@ class Areq:
         self, 
         password: str, 
         pkey_path: str
-    ) -> paramiko.SSHClient:
+    ) -> paramiko.SSHClient | Error:
         ssh = paramiko.SSHClient()
         ssh.load_host_keys(os.path.expanduser(os.path.join("~", ".ssh", "known_hosts")))
         if pkey_path:
@@ -82,11 +82,42 @@ class Areq:
         local_file_path: str,
         remote_file_path: str
     ) -> None:
-        try:
-            sftp = self._ssh.open_sftp()
-            sftp.put(local_file_path, remote_file_path)
-            sftp.close()
-            print(f"Uploaded file successfully to path: {remote_file_path}")
-        except Exception as e:
-            print(f"Unable to upload the file. Error: {e}")
+        sftp = self._ssh.open_sftp()
+        sftp.put(local_file_path, remote_file_path)
+        sftp.close()
+        print(f"Uploaded file successfully to path: {remote_file_path}")
+            
+    def download_file(
+        self,
+        remote_file_path: str,
+        local_file_path: str
+    ) -> None:
+        sftp = self._ssh.open_sftp()
+        sftp.get(remote_file_path, local_file_path)
+        sftp.close()
+        print(f"Downloaded file successfully to path: {remote_file_path}")
  
+    def create_and_download_proxy(
+        self,
+        proxy_passphrase: str,
+        local_file_path: str
+    ) -> None:
+        _, stdout, stderr = self._ssh.exec_command(f'echo {proxy_passphrase} | grid-proxy-init -out ~/proxy -pwstdin', get_pty=True)
+        
+        stderr_string = stderr.read().decode('ascii')
+        stdout_string = stdout.read().decode('ascii')
+        print(stdout_string, stderr_string)
+        if len(stderr_string) > 0:
+            raise Error(f'Got remote error : {stderr_string}')
+        
+        _, stdout, stderr = self._ssh.exec_command('cat ~/proxy| base64 | tr -d \'\\n\' > proxy2', get_pty=True)
+        
+        stderr_string = stderr.read().decode('ascii')
+        stdout_string = stdout.read().decode('ascii')
+        print(stdout_string, stderr_string)
+        if len(stderr_string) > 0:
+            raise Error(f'Got remote error : {stderr_string}')
+        
+        self.download_file(f'/net/people/plgrid/{self._username}/proxy2', local_file_path)
+
+        
