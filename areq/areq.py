@@ -1,3 +1,4 @@
+import base64
 import os
 from collections.abc import Sequence
 from typing import Literal, TypeAlias
