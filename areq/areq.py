@@ -5,11 +5,20 @@ from typing import Literal, TypeAlias
 
 import requests
 import urllib.parse
+import paramiko
 
-from .options import Options, to_sbatch_options
-from .response import Error, SubmitResponse
+from options import Options, to_sbatch_options
+from response import Error, SubmitResponse
 
 Hosts: TypeAlias = Literal["ares.cyfronet.pl"]
+
+
+class SSHException(Exception):
+    ...
+
+
+class AreqException(Exception):
+    ...
 
 
 def _build_script(lines: Sequence[str], options: Options, shebang: str | None) -> str:
@@ -33,12 +42,12 @@ class Areq:
 
     def __init__(
         self,
-        proxy_path: str | bytes | os.PathLike,
+        username: str,
         host: Hosts = "ares.cyfronet.pl",
         interpreter: str | None = "/bin/sh",
+        pkey_path: str | None = None,
+        password: str | None = None,
     ) -> None:
-        self._host = host
-
         if interpreter is None:
             self._shebang = None
         else:
@@ -46,16 +55,35 @@ class Areq:
                 interpreter if interpreter.startswith("#!") else f"#!{interpreter}"
             )
 
-        with open(proxy_path, "rb") as proxy_file:
-            proxy = proxy_file.read()
-            proxy = base64.encodebytes(proxy)
-            proxy = proxy.replace(b"\n", b"")
+        self._proxy: bytes | None = None
+        self._host = host
+        self._username = username
+        self._ssh = self.establish_ssh_session(password, pkey_path)
 
-        self._proxy = proxy
+    def establish_ssh_session(
+        self, password: str | None, pkey_path: str | None
+    ) -> paramiko.SSHClient:
+        ssh = paramiko.SSHClient()
+        ssh.load_host_keys(os.path.expanduser(os.path.join("~", ".ssh", "known_hosts")))
+
+        if pkey_path:
+            pkey = paramiko.RSAKey(filename=pkey_path)
+            ssh.connect(self._host, username=self._username, pkey=pkey)
+        elif password:
+            ssh.connect(self._host, username=self._username, password=password)
+        else:
+            raise ValueError(
+                "Either 'password' or 'private_key_path' must be provided."
+            )
+
+        return ssh
 
     def _request(
         self, method: str, path: str, *, headers: dict[str, str] | None = None, **kwargs
     ) -> requests.Response:
+        if self._proxy is None:
+            raise AreqException("Proxy not initialized")
+
         return requests.request(
             method,
             self._BASE_URL + path,
@@ -112,3 +140,45 @@ class Areq:
 
         if not response.ok:
             return response.json()
+
+    def upload_file(self, local_file_path: str, remote_file_path: str) -> None:
+        sftp = self._ssh.open_sftp()
+        sftp.put(local_file_path, remote_file_path)
+        sftp.close()
+
+    def download_file(self, remote_file_path: str, local_file_path: str) -> None:
+        sftp = self._ssh.open_sftp()
+        sftp.get(remote_file_path, local_file_path)
+        sftp.close()
+
+    def create_and_download_proxy(
+        self, proxy_passphrase: str, local_file_path: str
+    ) -> None:
+        _, _, stderr = self._ssh.exec_command(
+            f"echo '{proxy_passphrase}' | grid-proxy-init -out ~/proxy -pwstdin",
+            get_pty=True,
+        )
+
+        stderr_string = stderr.read().decode("ascii")
+
+        if len(stderr_string) > 0:
+            raise SSHException(f"Remote error: {stderr_string}")
+
+        _, _, stderr = self._ssh.exec_command(
+            "cat ~/proxy| base64 | tr -d '\\n' > proxy2", get_pty=True
+        )
+
+        stderr_string = stderr.read().decode("ascii")
+
+        if len(stderr_string) > 0:
+            raise SSHException(f"Remote error: {stderr_string}")
+
+        self.download_file(
+            f"/net/people/plgrid/{self._username}/proxy2", local_file_path
+        )
+
+        with open(local_file_path, "rb") as proxy_file:
+            proxy = proxy_file.read()
+            proxy = base64.encodebytes(proxy)
+            proxy = proxy.replace(b"\n", b"")
+            self._proxy = proxy
