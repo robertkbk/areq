@@ -1,12 +1,16 @@
 import os
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from time import sleep
+from typing import Literal, TypeAlias, Dict
+from tensorflow.keras.models import Sequential
+
 
 import requests
 import paramiko
 
-from options import Options, to_sbatch_options
-from response import Error, SubmitResponse
+from .options import Options, to_sbatch_options
+from .tensorflow_model_handler import TensorflowModelHandler
+from .response import Error, SubmitResponse
 Hosts: TypeAlias = Literal["ares.cyfronet.pl"]
 
 
@@ -24,6 +28,7 @@ class Areq:
         self._host = host
         self._username = username
         self._ssh = self.establish_ssh_session(password, pkey_path)
+        self._proxy_path = None
         
     def establish_ssh_session(
         self, 
@@ -119,5 +124,41 @@ class Areq:
             raise Error(f'Got remote error : {stderr_string}')
         
         self.download_file(f'/net/people/plgrid/{self._username}/proxy2', local_file_path)
+        self._proxy_path = local_file_path
+    
+    def fit_model(
+        self,
+        model: any,
+        x_train: any,
+        y_train: any,
+        training_config: any
+    ) -> (any, Dict[str, any]):
+        if isinstance(model, Sequential):
+            tf_model_handler = TensorflowModelHandler()
+            model_path = tf_model_handler.save_model(model)
+            x_train_path, y_train_path = tf_model_handler.save_dataset(x_train, y_train)
+            training_config_path = tf_model_handler.save_training_config(training_config)
+            
+            self.upload_file(model_path,f'/net/people/plgrid/{self._username}/areq/model.keras')
+            self.upload_file(x_train_path,f'/net/people/plgrid/{self._username}/areq/x_train.npy')
+            self.upload_file(y_train_path,f'/net/people/plgrid/{self._username}/areq/y_train.npy')
+            self.upload_file(training_config_path,f'/net/people/plgrid/{self._username}/areq/training_config.json')
+            
+            # TODO: change path in case of using in package
+            self.upload_file('./areq/resources/tensorflow_default_script.py',f'/net/people/plgrid/{self._username}/areq/default_script.py')
+            
+            # TODO: submit the job
+            print('Waiting to be started')
+            sleep(1)
+            
+            print('Waiting to be finished')
+            sleep(1)
+            # TODO: wait for the results
+            
+            self.download_file(f'/net/people/plgrid/{self._username}/areq/weights.h5','./weights.h5')
+            self.download_file(f'/net/people/plgrid/{self._username}/areq/history.json','./history.json')
+            sleep(1)
+            return tf_model_handler.load_trained_model('./weights.h5','./history.json')
+            
 
         
